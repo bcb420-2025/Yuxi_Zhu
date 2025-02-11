@@ -1,0 +1,577 @@
+---
+title: "BCB420 Computational System Biology"
+subtitle: "Assignment 1: Data set selection and initial Processing"
+author: "Yuxi Zhu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+bibliography: rmd_references.bib
+csl: biomed-central.csl
+---
+
+First, we want to load all the library used.
+
+```{r message=FALSE}
+library(GEOquery)
+library(limma)
+library(edgeR)
+library(dplyr)
+library(biomaRt)
+library(knitr)
+library(ggplot2)
+```
+
+## Select an Expression Data Set
+
+I am primarily interested in PDAC research and I am curious in looking at it from the genomic perspective [@hussain2024macrophages]. I went on GEO and search PDAC with filters: Homo sapiens, Expression profiling by high throughput sequencing, Publication date from 2020/01/01 to 2025/12/31, Sample count from 5 to 100, TXT [@edgar2002gene]. I was able to narrow down the search into 34 datasets. I manually went through most of it and finalize on the dataset GSE226448. It has 4 different conditions and performed under 3 biological replicates for each. It is performed using Illumina NovaSeq 6000 and it is also newly published in 2024. We first download the dataset and analyze using GEOquery [@davis2007geoquery].
+
+```{r message=FALSE}
+data_geoid <- "GSE226448"
+gse <- getGEO(data_geoid, GSEMatrix=FALSE)
+```
+
+Here are the summary of the dataset. `r gse@header$summary`
+
+Additional data exploration.
+
+```{r message=FALSE}
+current_gpl <- names(GPLList(gse))[[1]]
+current_gpl_info <- Meta(getGEO(current_gpl))
+```
+
+Here are the additional information regarding the dataset.
+
+Platform: `r current_gpl_info$title`\n
+
+Submission Date: `r current_gpl_info$submission_date`\n
+
+Organism: `r current_gpl_info$organism`\n
+
+The data processing indicates that the dataset from the supplementary file contains gene-level count values for each sample that is proprocessed, aligned and quantified.
+
+```{r}
+gse@gsms[[1]]@header$data_processing
+```
+
+## Clean the data and map to HUGO symbols
+
+### 1-Downloading the data
+
+The filename for the dataset which contains the count are obtained. There are only 1 file in the supplementary files and it is also the raw count RNA seq data.
+
+```{r}
+sfilenames <- GEOquery::getGEOSuppFiles(data_geoid, fetch_files=FALSE)
+data_filename <- sfilenames$fname[1]
+```
+
+We will download the first file if neccessary.
+
+```{r message=FALSE}
+download_dir <- file.path(getwd())
+missing_files <- sfilenames$fname[!file.exists(file.path(download_dir, data_geoid, sfilenames$fname[1]))]
+if(length(missing_files) >0){
+  for(i in 1:length(missing_files)){
+  sfiles = getGEOSuppFiles(data_geoid,
+  filter_regex = missing_files[i],
+  baseDir = download_dir,
+  fetch_files = TRUE)
+  }
+}
+```
+
+### 2 - Assess ...
+
+It contains 60660 rows of gene, which should be a good length for RNA seq dataset as shown in lecture.
+
+```{r}
+mc_seq_data <- read.table(
+  file.path(download_dir,data_geoid,data_filename),
+  header=TRUE,
+  check.names=FALSE)
+dim(mc_seq_data)[1]
+```
+
+The rows 2, 3, 4, 5 and 6, containing detail about the gene length and chromosome number, are removed; the columns are processed and the rowname of the dataframe is set to the geneid. The resulting dataframe contains the Ensembl identifiers and the counts of each samples only. Based on the values of the data_frame, they are all whole numbers so it should be raw counts. And "ENSG" indicates that it is a ***gene level*** data and it is ***Ensembl Gene ID***.
+
+```{r}
+mc_seq_data_accessed <- mc_seq_data[-c(2, 3, 4, 5, 6)]
+rownames(mc_seq_data_accessed) <- mc_seq_data_accessed$Geneid
+mc_seq_data_accessed$Geneid <- NULL
+colnames(mc_seq_data_accessed) <- gsub("03aln/bam/|\\.map\\.sort\\.bam", "", colnames(mc_seq_data_accessed))
+kable(mc_seq_data_accessed[1:5, 1:5],format="html")
+```
+
+The boxplot shows the distribution of raw counts in each dataset. This is expected for raw counts in RNA seq dataset as many genes are not expressed and only few genes are high expressed.
+
+```{r}
+boxplot(mc_seq_data_accessed,
+        xlab = "Samples", 
+        ylab = "Counts",
+        las = 2,
+        cex = 0.5,
+        cex.lab = 0.5,
+        cex.axis = 0.5,
+        main = "Boxplots of Raw Counts for RNA-Seq Samples",
+        col = rainbow(ncol(mc_seq_data_accessed)),
+        border = "black")
+abline(h = median(apply(mc_seq_data_accessed, 2, median)),
+       col = "green", lwd = 0.6, lty = "dashed")
+```
+
+All samples in the dataset are grouped and summarized.
+
+```{r}
+list_of_samples <- gse@gsms
+samples_type <- do.call(rbind,
+                        lapply(list_of_samples,
+                          FUN=function(x){
+                          c(x@header$title,
+                          x@header$characteristics_ch1)
+                          }
+                        )
+                      )
+```
+
+```{r}
+colnames(samples_type) <- c("title", "tumor source tissue", "genotype","treatment")
+samples_type[,'tumor source tissue'] <- gsub(samples_type[,'tumor source tissue'],
+                                pattern = "cell type: ",
+                                replacement = "")
+samples_type[,'genotype'] <- gsub(
+                            samples_type[,'genotype'],
+                            pattern = "genotype: ",
+                            replacement = "")
+samples_type[,'treatment'] <- gsub(
+                              samples_type[,'treatment'],
+                              pattern = "treatment: ",
+                              replacement = "")
+kable(samples_type, format = "html")
+```
+
+### 3 -- Map ...
+
+Now we conduct identifier mappings. First, we get rid of the version number associated with our ENSEMBL ids.
+
+```{r}
+mc_seq_matrix <- as.matrix(mc_seq_data_accessed)
+rownames(mc_seq_matrix) <- unlist(lapply(rownames(mc_seq_matrix),
+                                             FUN=function(x){unlist(strsplit(x,split = "\\."))[1]}))
+kable(mc_seq_matrix[1:5, 1:5],format="html")
+```
+
+There are 44 duplicated Ensembl IDs. Since they will be mapped to same HUGO gene symbols, we will deal with them downstream after mapping.
+
+```{r}
+sum(duplicated(rownames(mc_seq_matrix)))
+```
+
+Since the original dataset used Ensembl ids, it is best to use Ensembl database for mapping HUGO gene symbols. Connect to Ensembl Biomart database using biomaRt package [@durinck2009mapping]. The dataset specific for human is selected.
+
+```{r}
+ensembl <- useMart("ensembl")
+ensembl <- useDataset("hsapiens_gene_ensembl",mart=ensembl)
+```
+
+Obtain the Ensembl Ids to convert.
+
+```{r}
+ids2convert <- rownames(mc_seq_matrix)
+```
+
+The conversion table is loaded through querying Ensembl.
+
+```{r message=FALSE}
+conversion_stash <- "id_conversion.rds"
+if(file.exists(conversion_stash)){
+  id_conversion <- readRDS(conversion_stash)
+} else {
+  id_conversion <- getBM(attributes =
+  c("ensembl_gene_id","hgnc_symbol"),
+  filters = c("ensembl_gene_id"),
+  values = ids2convert,
+  mart = ensembl)
+  saveRDS(id_conversion, conversion_stash)
+}
+```
+
+Some of the ensembl_gene_id in id_conversion are paired empty hgnc_symbol, it conveys no information so we want to remove them for downstream processing.
+
+```{r}
+id_conversion <- id_conversion %>%
+    filter(hgnc_symbol!="")
+```
+
+We convert the matrix to dataframe for easier processing
+
+```{r}
+mc_seq_df <- as.data.frame(mc_seq_matrix)
+mc_seq_df$ensembl_gene_id <- rownames(mc_seq_df) 
+```
+
+The expression values ensembl ids that are found in the conversion table.
+
+```{r}
+length(which(rownames(mc_seq_matrix) %in% id_conversion$ensembl_gene_id))
+```
+
+The expression values or ensembl ids that are not found in the conversion table.
+
+```{r}
+nrow(mc_seq_matrix) - length(which(rownames(mc_seq_matrix) %in% id_conversion$ensembl_gene_id))
+```
+
+The dataframe is annotated with hgnc symbol.
+
+```{r}
+mc_seq_matrix_annot <- merge(id_conversion,
+                                 mc_seq_matrix,
+                                 by.x = 1,
+                                 by.y = 0, all.y=TRUE)
+kable(mc_seq_matrix_annot[1:5,1:5],type = "html")
+```
+
+The number of rows in the matrix is 60663, which is greater than original 60660 rows suggest that some ensembl gene IDs in id_conversion map to multiple rows in mc_seq_matrix. This is expected as there are duplicates in ensembl gene IDs in both id_conversion and mc_seq_matrix
+
+```{r}
+sum(duplicated(id_conversion$ensembl_gene_id))
+sum(duplicated(rownames(mc_seq_matrix)))
+nrow(mc_seq_matrix_annot)
+```
+
+19688 rows in the matrix do not have matching hgnc_symbol.
+
+```{r}
+ensembl_id_missing_gene <- mc_seq_matrix_annot %>%
+  filter(is.na(hgnc_symbol)) %>%
+  pull(ensembl_gene_id)
+length(ensembl_id_missing_gene)
+
+kable(mc_seq_matrix_annot[
+  which(is.na(mc_seq_matrix_annot$hgnc_symbol))[1:5],1:5],
+  type="html")
+```
+
+The genes with no hgnc_symbol are removed.
+
+```{r}
+mc_seq_matrix_annot <- mc_seq_matrix_annot %>%
+  filter(!is.na(hgnc_symbol))
+length(mc_seq_matrix_annot$hgnc_symbol)
+```
+
+There are 3 rows that have duplicated ensembl_gene_ids.
+
+```{r}
+sum(duplicated(mc_seq_matrix_annot$ensembl_gene_id))
+```
+
+First, I handle them by looking them up on HGNC Database [@seal2023genenames]. For ENSG00000230417, since both symbols are approved and non-coding RNA, I will pick one of them. For ENSG00000280739, it does not show any search results for related hgnc_symbol, I will choose 1 randomly. For ENSG00000286061, only RCAN3AS are found in the search results so I will use this one.
+
+```{r}
+duplicated_ensembl <- mc_seq_matrix_annot %>%
+    filter(ensembl_gene_id %in% ensembl_gene_id[duplicated(ensembl_gene_id)])
+kable(duplicated_ensembl[1:5, 1:5], format="html")
+mc_seq_matrix_annot <- mc_seq_matrix_annot %>% 
+  filter(!(ensembl_gene_id == "ENSG00000230417" & hgnc_symbol == "LINC00856")) %>% 
+  filter(!(ensembl_gene_id == "ENSG00000280739" & hgnc_symbol == "ENTPD3-AS1")) %>% 
+  filter(!(ensembl_gene_id == "ENSG00000286061" & hgnc_symbol == "RCAN3AS"))
+```
+
+Now, we handle the case where multiple identifiers that map to same hgnc_symbol. There are 18 rows that have duplicated symbols.
+
+```{r}
+sum(duplicated(mc_seq_matrix_annot$hgnc_symbol))
+duplicated_hgnc <- mc_seq_matrix_annot %>%
+    filter(hgnc_symbol %in% hgnc_symbol[duplicated(hgnc_symbol)])
+kable(duplicated_hgnc[1:5, 1:5], format="html")
+```
+```{r}
+mc_seq_matrix_annot <- mc_seq_matrix_annot %>% dplyr::select(-ensembl_gene_id)
+duplicate_genes <- mc_seq_matrix_annot %>% count(hgnc_symbol) %>% filter(n > 1) %>% pull(hgnc_symbol)
+```
+
+The duplicated symbols are solved. Row with the same symbol are combined to 1 row with the count value being the average of all duplicated rows.
+
+```{r}
+dup_rows <- mc_seq_matrix_annot %>% filter(hgnc_symbol %in% duplicate_genes)
+unique_rows <- mc_seq_matrix_annot %>% filter(!hgnc_symbol %in% duplicate_genes)
+agg_dup_rows <- dup_rows %>%
+  group_by(hgnc_symbol) %>%
+  summarise(across(where(is.numeric), \(x) mean(x, na.rm = TRUE)), .groups = "drop")
+final_mc_seq_df_annot <- bind_rows(unique_rows, agg_dup_rows)
+```
+
+We shrink our dataset into the mapped matrix with HUGO symbols that contains 40954 rows, with no duplicated HUGO symbols
+```{r}
+mc_matrix_mapped <- final_mc_seq_df_annot %>% dplyr::select(-hgnc_symbol) %>% as.matrix()
+rownames(mc_matrix_mapped) <- final_mc_seq_df_annot$hgnc_symbol
+dim(mc_matrix_mapped)
+sum(duplicated(rownames(mc_matrix_mapped)))
+```
+The resulting mapped matrix looks like this.
+```{r}
+kable(mc_matrix_mapped[1:5, 1:5], format="html")
+```
+
+### 4 -- Clean ...
+
+Next step, We need to get rid of genes with low counts! We first look into the distribution of each sample before filtering for outliers.
+
+```{r}
+data2plot <- log2(cpm(mc_matrix_mapped)) # add 1 to avoid log2(0)
+boxplot(data2plot, 
+        xlab = "Samples", 
+        ylab = "log2 CPM",
+        las = 2, cex = 0.5, cex.lab = 0.5,
+        cex.axis = 0.5, 
+        main = "Log2 CPM for Mapped RNA-Seq Reads Boxplot (Pre-Filtering)")
+        #draw the median on each box plot
+        abline(h = median(apply(data2plot, 2, median)),
+               col = "green", lwd = 0.6, lty = "dashed")
+```
+
+The density plot for the unfiltered dataset. It seems that it follows a bimodal distribution with 2 peak.
+
+```{r}
+counts_density <- apply(log2(mc_matrix_mapped), 2, density)
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density)) {
+xlim <- range(c(xlim, counts_density[[i]]$x));
+ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+ylab="Smoothing density of log2-CPM for Mapped RNA-Seq Reads (Pre-Filtering)",
+main="", cex.lab = 0.85)
+for (i in 1:length(counts_density))
+lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+legend("topright", colnames(data2plot),
+col=cols, lty=ltys, cex=0.75,
+border ="blue", text.col = "green4",
+merge = TRUE, bg = "gray90")
+```
+
+We then look into the minimal number of samples. Since there are 3 samples for each conditions, we choose 3 samples as the minimal number of samples.
+
+```{r}
+samples_type_dt <- data.table::data.table(samples_type)
+kable(samples_type_dt[, .(count = .N), by = samples_type_dt$treatment ], format="html")
+```
+
+We remove the genes with low counts based on the minimal number of samples, based on the recommendation by edgeR [@robinson2010edger].
+
+```{r}
+min_num_samples <- 3
+keep = rowSums(cpm(mc_matrix_mapped) >1) > min_num_samples
+mc_matrix_mapped_filtered = mc_matrix_mapped[keep,]
+```
+
+The number of genes in our dataset went from 40954 to 13121 after removing low counts.
+
+```{r}
+dim(mc_matrix_mapped)[1]
+dim(mc_matrix_mapped_filtered)[1]
+```
+
+We then plot the density and distribution plot after the filtering. The first peak seems to be smoothed out in the density plot and the boxplots for each sample shows that the majority of the count values are higher.
+
+```{r}
+counts_density <- apply(log2(mc_matrix_mapped_filtered), 2, density)
+#calculate the limits across all the samples
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density)) {
+  xlim <- range(c(xlim, counts_density[[i]]$x));
+  ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+#plot the first density plot to initialize the plot
+plot(counts_density[[1]], 
+     xlim=xlim, ylim=ylim, type="n",
+     ylab="Smoothing density of log2-CPM for Mapped RNA-Seq Reads (Filtered)",
+     main="", cex.lab = 0.85)
+#plot each line
+for (i in 1:length(counts_density))
+  lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+  #create legend
+  legend("topright", colnames(data2plot),
+  col=cols, lty=ltys, cex=0.75,
+  border ="blue", text.col = "green4",
+  merge = TRUE, bg = "gray90")
+```
+
+```{r warning=FALSE}
+data2plot <- log2(cpm(mc_matrix_mapped_filtered)) # add 1 to avoid log2(0)
+boxplot(data2plot, 
+        xlab = "Samples", 
+        ylab = "log2(CPM+1)",
+        las = 2, cex = 0.5, cex.lab = 0.5,
+        cex.axis = 0.5, 
+        main = "Log2 CPM for Mapped RNA-Seq Reads Boxplot (Filtered)")
+        #draw the median on each box plot
+        abline(h = median(apply(data2plot, 2, median)),
+               col = "green", lwd = 0.6, lty = "dashed")
+```
+
+## Apply Normalization
+
+First we create the groups of our datasets.
+
+```{r}
+sample_names <- colnames(mc_matrix_mapped_filtered)
+groups <- factor(gsub("_rep[0-9]+", "", sample_names))
+groups
+```
+
+We then obtain the normalized RNA-Seq count data, by applying TMM to our dataset using EdgeR [@robinson2010edger].
+
+```{r}
+d_data = DGEList(counts=mc_matrix_mapped_filtered, group=groups)
+d_data = calcNormFactors(d_data)
+mc_matrix_normalized <- cpm(d_data)
+```
+
+We plot the density plot for the noramalized counts. The density plots for all sample seem to be more centered and less spread out and the boxplot does not show a huge difference as the median is already roughly centered before the normalization.
+
+```{r}
+counts_density <- apply(log2(mc_matrix_normalized), 2, density)
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density)) {
+xlim <- range(c(xlim, counts_density[[i]]$x));
+ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+ylab="Smoothing density of log2-CPM for Normalized RNA-Seq Reads",
+main="", cex.lab = 0.85)
+for (i in 1:length(counts_density))
+lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+legend("topright", colnames(data2plot),
+col=cols, lty=ltys, cex=0.75,
+border ="blue", text.col = "green4",
+merge = TRUE, bg = "gray90")
+```
+
+```{r warning=FALSE}
+data2plot <- log2(mc_matrix_normalized)
+  boxplot(data2plot, xlab = "Samples", ylab = "log2 TPM",
+  las = 2, cex = 0.5, cex.lab = 0.5,
+  cex.axis = 0.5, main = "Boxplots of Log2 CPM for Normalized RNA-Seq Reads Boxplot")
+  abline(h = median(apply(data2plot, 2, median)),
+  col = "green", lwd = 0.6, lty = "dashed")
+```
+
+The MDS plot shows that the samples from different group are well seperated [@ritchie2015limma]. Given that the sample are from human derived cell line samples, it should be expected and it would be less noisy as the patient RNA seq as shown in the lecture.
+
+```{r}
+plotMDS(d_data, labels=NULL, pch = 1,
+               col = c("darkgreen","blue", "red", "purple")[factor(groups)])
+legend("topright",
+       legend=levels(factor(groups)),
+       pch=c(1), col= c("darkgreen","blue","red", "purple"),title="Class",
+       bty = 'n', cex = 0.75)
+```
+
+We then calculate dispersion to assess the quality of the normalized dataset.
+```{r}
+d_data <- calcNormFactors(d_data)
+model_design <- model.matrix(~groups)
+d_data <- estimateDisp(d_data, model_design)
+```
+
+Biological Coefficient of Variation (BCV) Plot from edgeR shows that the gene with more counts have smaller variations between samples than genes with few counts, which is expected in RNA-seq data [@robinson2010edger]. Since there are low BCV values at high expression level, it indicates that this normalized dataset is reliable. Since the BCV values at low expression level is not as widely spread, it indicates that the technical variation is not high. 
+
+```{r}
+plotBCV(d_data, col.tagwise="black", col.common = "red",)
+```
+
+We then look into the mean variance relationship of our dataset. The dataset doesn't follow the black line representing poisson distribution strictly, which is expected in RNA seq dataset.
+
+```{r}
+plotMeanVar(d_data, 
+            show.raw.vars = TRUE,
+            show.tagwise.vars=FALSE,
+            NBline=FALSE,
+            show.ave.raw.vars = FALSE,
+            show.binned.common.disp.vars = FALSE
+            )
+```
+
+We got tighter distribution if we use tagwise variance, which measure gene-specific dispersion, indicating it is a more stable estimate.
+
+```{r}
+plotMeanVar(d_data, 
+            show.raw.vars = TRUE,
+            show.tagwise.vars=TRUE,
+            NBline=FALSE,
+            show.ave.raw.vars = FALSE,
+            show.binned.common.disp.vars = FALSE
+            )
+```
+
+The raw variance from the dataset (shown in dark red) are similiar with the adjusted variance, indicating that the dataset is naturally well-behaved.
+
+```{r}
+plotMeanVar(d_data, 
+            show.raw.vars = TRUE,
+            show.tagwise.vars=TRUE,
+            NBline=FALSE,
+            show.ave.raw.vars = TRUE,
+            show.binned.common.disp.vars = FALSE
+            )
+```
+
+The dataset also fit the binned common dispersion line well it suggest that the dataset follows a common dispersion model well.
+
+```{r}
+plotMeanVar(d_data, 
+            show.raw.vars = TRUE,
+            show.tagwise.vars = TRUE,
+            NBline = FALSE, 
+            show.ave.raw.vars = TRUE,
+            show.binned.common.disp.vars = TRUE)
+```
+
+The dataset is well fitted to the negative binomial (NB) variance trend line which satisfy the assumption of edgeR [@robinson2010edger].
+
+```{r}
+plotMeanVar(d_data, 
+            show.raw.vars = TRUE, 
+            show.tagwise.vars=TRUE,
+            show.ave.raw.vars = TRUE, 
+            NBline=TRUE,
+            show.binned.common.disp.vars = TRUE)
+```
+
+We then save the normalized dataset to the output
+
+```{r}
+df <- as.data.frame(mc_matrix_normalized)
+kable(df[1:5, 1:5], format="html")
+write.table(df,
+            file.path(getwd(), data_geoid,
+                      paste(data_geoid, "normalized_filtered_counts.txt", sep = "_")),
+            quote = FALSE, sep = "\t", row.names = TRUE, col.names = NA)
+```
+
+## Interpret and Document
+
+**Why is the dataset of interest to you?** I choose this dataset because I want to look into pancreatic ductal adenocarcinoma (PDAC) from transcriptomic perspective as I am working on PDAC in my other thesis course (BCB330). PDAC is also one of the deadliest cancer with five year survival rate of less than 10% [@sarantis2020pancreatic].
+
+**What are the control and test conditions of the dataset?** The control condition is the healthy human donor macrophage and the test conditions are the macrophage coculture with human PDAC CAFs, macrophages in coculture with human PDAC CAFs with Folfirinox treatment, and macrophages treated with Folfirinox.
+
+**How many samples in each of the conditions of your dataset?** There are 3 samples in each of the conditions of my dataset.
+
+**Were there expression values that were not unique for specific genes? How did you handle these?** There were 44 duplicated Ensemble IDs that were not unique for specific genes. I didn't handle it on the spot but instead I choose to do downstream after mapping to HGNC symbol. As the same Ensemble ID will be mapped to the same HGNC symbol, I removed the duplicated HGNC symbols downstream at once.
+
+**Were there expression values that could not be mapped to current HUGO symbols?** Yes, there were 19651 expression values that could not be mapped to current HUGO symbols.
+
+***Were there any outliers in your dataset? How were they handled in the originating paper? How many outliers were removed?*** The outliers in my dataset does not exist after mapping to HGNC symbols and all genes remaining have total count number summing across samples that are greater than or equal to 3, which is the number of samples in each conditions. In the original paper, the method in which they remove outliers is not stated.
+
+***How did you handle replicates?*** There are no technical replicates are all samples are the same run. However, there are biological replicates as they are 3 samples in each conditions. I am handling it by group them into the same group in further analysis.
+
+***What is the final coverage of your dataset?*** The final coverage of my dataset is around 13121 genes with normalized counts.
