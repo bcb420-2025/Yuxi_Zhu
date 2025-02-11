@@ -11,7 +11,7 @@ bibliography: rmd_references.bib
 csl: biomed-central.csl
 ---
 
-First, we want to load all the library used.
+First, we want to load all the library used, including limma [@ritchie2015limma], edgeR [@robinson2010edger], knitr for report generation [@xie2018knitr], and ggplot2 for visualization [@villanueva2019ggplot2], biomaRt [@durinck2009mapping] and GEOquery [@davis2007geoquery].
 
 ```{r message=FALSE}
 library(GEOquery)
