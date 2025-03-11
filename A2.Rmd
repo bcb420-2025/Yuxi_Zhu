@@ -1,0 +1,452 @@
+---
+title: "BCB420 Computational System Biology"
+subtitle: "Assignment 2: Differential Gene expression and Preliminary ORA"
+author: "Yuxi Zhu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+bibliography: a2_references.bib
+csl: biomed-central.csl
+---
+# A2 Wiki
+
+[Yuxi Zhu GitHub Wiki](https://github.com/bcb420-2025/Yuxi_Zhu/wiki/Entry-9:-A2-Differential-Gene-expression-and-Preliminary-ORA)
+
+The libraries used for this analysis are [@robinson2010edger; @kolberg2023g; @wickham2009ggplot2; @gu2022complex; @gu2014circlize; @ritchie2015limma; @xie2018knitr]:
+
+```{r message=FALSE}
+library(edgeR)
+library(ComplexHeatmap)
+library(circlize)
+library(ggplot2)
+library(knitr)
+library(dplyr)
+library(limma)
+library(gprofiler2)
+```
+
+# Introduction
+
+Pancreatic ductal adenocarcinoma (PDAC) is one of most deadly cancer with low five year survival rate. In this analysis, I will be looking at specifically RNA seq expression of macrophages with and without PDAC cancer-associated fibroblasts (CAFs) and the expression of macrophages with CAFs and with CAFs and FOLFIRINOX, which can infer information on intricate relationship between PDAC CAF and FOLFIRINOX and whether how FOLFIRINOX could modify the effect of CAF on PDAC patients [@hussain2024macrophages].
+
+### Dataset Used
+
+Previous, I conducted data exploration on the my dataset of interest (GSE226448). After data cleaning to the original raw counts, I mapped the genes to HUGO symbols and applied normalization using edgeR package [@robinson2010edger]. The coverage of the dataset went from 60660 to 13121 genes. The distribution of the dataset after normalization follows roughly negative binomial distribution, which is required desired for edgeR's implementation of downstream analysis.
+
+```{r}
+file_path <- file.path(getwd(), "GSE226448", "GSE226448_normalized_filtered_counts.txt") # from output of A1
+normalized_data <- read.table(file_path, header = TRUE, sep = "\t", row.names = 1, check.names = FALSE)
+normalized_matrix <- as.matrix(normalized_data)
+normalized_matrix_num <- matrix(as.numeric(normalized_matrix), 
+                                nrow = nrow(normalized_matrix), 
+                                ncol = ncol(normalized_matrix), 
+                                dimnames = dimnames(normalized_matrix))
+kable(normalized_matrix_num[1:5, 1:5], format="html")
+```
+
+From Figure 1, we can see the distribution of the RNA seq reads are smooth and no spread out, which is expected in normalized RNA seq data. The boxplot, as shown in figure 2 shows that the median is already roughly centered for the normalized RNA seq data.
+
+```{r, fig.cap="Figure 1: Distribution of the normalized gene read counts for all 12 samples."}
+data2plot <- log2(normalized_matrix_num)
+counts_density <- apply(log2(normalized_matrix_num), 2, density)
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density)) {
+xlim <- range(c(xlim, counts_density[[i]]$x));
+ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n",
+ylab="Smoothing density of log2-CPM for Normalized RNA-Seq Reads",
+main="", cex.lab = 0.85)
+for (i in 1:length(counts_density))
+lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+legend("topright", colnames(data2plot),
+col=cols, lty=ltys, cex=0.75,
+border ="blue", text.col = "green4",
+merge = TRUE, bg = "gray90")
+```
+
+```{r, warning=FALSE, fig.cap="Figure 2: Boxplot of Distribution of the normalized gene read counts across all 12 samples."}
+
+boxplot(data2plot, xlab = "Samples", ylab = "log2 TPM",
+las = 2, cex = 0.5, cex.lab = 0.5,
+cex.axis = 0.5, main = "Boxplots of Log2 CPM for Normalized RNA-Seq Reads Boxplot")
+abline(h = median(apply(data2plot, 2, median)),
+col = "green", lwd = 0.6, lty = "dashed")
+```
+
+### Data Separation
+
+As seen in the MDS plot in Figure 3, the RNASeq data can be cleanly seperated by the four sample groups, where the replicates from sample groups are clustered closely together. This suggests that the four sample groups should be used as factors in the differential expression model.
+
+```{r, warning = FALSE, fig.cap="Figure 3: MDS plot of RNASeq data coloured by Sample Group. M2 macrophage samples are coloured as red; M2 macrophage treated FOLFIRINOX samples are coloured as purple; M2 macrophages co-cultured CAF are coloured as green and M2 macrophages co-cultured CAF and treated FOLFIRINOX are coloured as blue. This code adapted from BCB420 lecture."}
+sample_names <- colnames(normalized_matrix_num)
+groups <- factor(gsub("-", "_", gsub("_rep[0-9]+", "", sample_names)))
+dge <- DGEList(counts = normalized_matrix_num, group = groups)
+plotMDS(dge, labels=NULL, pch = 1,
+               col = c("darkgreen","blue", "red", "purple")[factor(groups)])
+legend("topright",
+       legend=levels(factor(groups)),
+       pch=c(1), col= c("darkgreen","blue","red", "purple"),title="Class",
+       bty = 'n', cex = 0.75)
+```
+
+# 1 Differential Gene Expression Analysis
+
+Since the dataset is already filtered and normalized from previous analysis using edgeR, the dataset will be used directly for differential expression analysis. In this analysis, the differential expression between M2 macrophages and M2 macrophages co-cultured with CAFs and the one between M2 macrophages co-cultured with CAFs and M2 macrophages with FOLFIRINOX treatment co-cultured with CAFs will be closely analyzed. The genes of interest are the 10 differentially expressed genes that are upregulated when adding CAFs to the control group and downregulated when you add CAFs under FOLFIRINOX treatment and vice versa: SLC40A1, METTL27, CCDC152, SELENOP, NLRP1, SHE, GPR155, SYNPO, GOS2 and LAD1, as reported in the paper [@hussain2024macrophages]. As reported in the paper, their expression seems to be completely switch under the presence or absence of FOLFIRINOX [@hussain2024macrophages].
+
+Note: Since same code will be ran twice, I will use functions to simplify that.
+
+```{r}
+model_design <- model.matrix(~ 0 + groups)
+colnames(model_design) <- levels(groups)
+dge <- estimateDisp(dge, model_design)
+contrast_matrix <- makeContrasts(
+  M2_vs_M2CAF = M2_CAF_CTRL - M2_CTRL,
+  M2_vs_M2FOLFIRINOX =  M2_FOLFI - M2_CTRL,
+  M2FOLFIRINOX_vs_M2CAFFOLFIRINOX = M2_CAF_FOLFI - M2_FOLFI,
+  M2CAF_vs_M2CAFFOLFIRINOX = M2_CAF_FOLFI - M2_CAF_CTRL,
+  levels = model_design
+)
+perform_de_analysis <- function(fit, contrast_param) {
+    # Raw p values
+    de_results <- glmQLFTest(fit, contrast = contrast_matrix[, contrast_param])
+    # Multiple hypothesis testing
+    de_hits <- topTags(de_results, sort.by = "PValue", adjust.method = "fdr", n=nrow(normalized_matrix_num))
+    de_genes <- rownames(de_hits$table[which(de_hits$table$FDR < 0.05 & abs(de_hits$table$logFC) > 1), ])
+    up_reg_genes <- rownames(de_hits$table[which(de_hits$table$FDR < 0.05 & de_hits$table$logFC > 1), ])
+    down_reg_genes <- rownames(de_hits$table[which(de_hits$table$FDR < 0.05 & de_hits$table$logFC < -1), ])
+    result_df <- de_hits$table
+    return(list(results_table = result_df))
+}
+
+generate_volcano_plot <- function(de_results, cus_title) {
+  results_df <- de_results$results_table
+  results_df$significance <- "ns"  # Default: Not significant
+  results_df$significance[results_df$FDR < 0.05 & abs(results_df$logFC) > 1] <- "Significant"
+  highlighted_genes <- c("SLC40A1", "METTL27", "CCDC152", "SELENOP", "NLRP1", 
+                          "SHE", "GPR155", "SYNPO", "GOS2", "LAD1")
+  results_df$highlight <- ifelse(rownames(results_df) %in% highlighted_genes, "Highlighted", "Not Highlighted")
+  upregulated_count <- sum(results_df$FDR < 0.05 & results_df$logFC > 1)
+  downregulated_count <- sum(results_df$FDR < 0.05 & results_df$logFC < -1)
+  total_DE_count <- sum(results_df$FDR < 0.05)
+  
+  highlighted_df <- subset(results_df, highlight == "Highlighted")
+# Create Volcano Plot
+  ggplot(results_df, aes(x = logFC, y = -log10(FDR), color = significance)) +
+    geom_point(alpha = 0.6) +  # Plot all genes
+    geom_point(data = highlighted_df, 
+               aes(x = logFC, y = -log10(FDR)), 
+               color = "red", size = 3) +  # Highlight specific genes
+    geom_text(data = highlighted_df, 
+              aes(label = rownames(highlighted_df)), 
+              color = "red", vjust = -1, hjust = 0.5, size = 4) +  # Label highlighted genes
+    scale_color_manual(values = c("gray", "blue")) +  # Define colors for significance
+    theme_minimal() +
+    labs(title = cus_title,
+         x = "Log2 Fold Change", y = "-Log10 FDR") +
+    theme(legend.position = "none") +
+    # Add annotation showing number of DE genes
+    annotate("text", x = min(results_df$logFC), y = max(-log10(results_df$FDR)) * 0.9, 
+             label = paste("DE genes:", total_DE_count, 
+                           "\nUpregulated:", upregulated_count, 
+                           "\nDownregulated:", downregulated_count),
+             color = "black", size = 4, hjust = 0.2)
+}
+```
+
+### 1a. Differential Expression Between M2 macrophages and M2 macrophages co-cultured with CAFs {#1a}
+
+By applying a threhold of p value less than 0.05, 3432 genes are significantly differentially expressed. Applying a multiple hypothesis testing method, specifically False Discovery Rate (FDR) method, 2437 genes passed correction and are significantly differentially expressed as shown in figure 4. FDR is a good choice for multiple hypothesis testing as it controls the proportion of false positives while also identify differentially expressed genes as it is less stringent and conservative compared to the Bonferroni correction. Similiar to the article, using the threshold of FDR adjusted p value less than 0.05 and log2 fold change of greater than 1 or less than -1 , 419 genes are upregulated and 304 genes are downregulated. As for the gene of interests, only 8 out of 10 of them are found in my dataset possibly due to them being filtered out during the preprocessing step. SYNPO and LAD1 is down-regulated when adding CAFs to macrophages and other 6 genes seems to be up regulated, which is consistent to the results in the paper.
+
+```{r fig.cap="Figure 4: Volcano plot comparing RNA-seq data between M2 macrophages and M2 macrophages co-cultured with CAFs, where the gene of interests are highlighted with the red dots."}
+fit <- glmQLFit(dge, model_design)
+M2_vs_M2CAF_DE <- perform_de_analysis(fit, "M2_vs_M2CAF")
+nrow(M2_vs_M2CAF_DE$results_table[M2_vs_M2CAF_DE$results_table$PValue < 0.05,])
+nrow(M2_vs_M2CAF_DE$results_table[M2_vs_M2CAF_DE$results_table$FDR < 0.05,])
+M2_vs_M2CAF_de_genes <- M2_vs_M2CAF_DE$all_DE_genes
+M2_vs_M2CAF_result_df <- M2_vs_M2CAF_DE$results_table
+generate_volcano_plot(M2_vs_M2CAF_DE, "Volcano Plot: M2 vs. M2CAF")
+```
+
+### 1b Differential Expression Between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX {#1b}
+
+Using the same workflow as above, applying a threhold of p value less than 0.05 gives 1030 significantly differentially expressed genes. 382 genes passed correction and are significantly differentially expressed. Using the threshold of FDR adjusted p value less than 0.05 and log2 fold change of greater than 1 or less than -1, 44 genes are upregulated and 12 genes are downregulated. As for the 8 gene of interests, SYNPO, LAD1,CCDC152,GPR155 are down-regulated and SHE, SLC40A1, SELENO1 and NLR1 are up-regulated. CCDC152 and GPR155 were previously up-regulated when adding CAF to control macrophages and it is now down-regulated.
+
+```{r my_ggplot5, fig.cap="Figure 5: Volcano plot comparing RNA-seq data between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX"}
+M2CAF_vs_M2CAFFOLFIRINOX_DE <- perform_de_analysis(fit, "M2CAF_vs_M2CAFFOLFIRINOX")
+nrow(M2CAF_vs_M2CAFFOLFIRINOX_DE$results_table[M2CAF_vs_M2CAFFOLFIRINOX_DE$results_table$PValue < 0.05,])
+nrow(M2CAF_vs_M2CAFFOLFIRINOX_DE$results_table[M2CAF_vs_M2CAFFOLFIRINOX_DE$results_table$FDR < 0.05,])
+generate_volcano_plot(M2CAF_vs_M2CAFFOLFIRINOX_DE, "Volcano Plot: M2CAF_vs_M2CAFFOLFIRINOX")
+```
+
+### 1c Differential Expression Analyis Using Heatmaps {#1c}
+
+```{r}
+
+sample_groups <-gsub("-", "_", gsub("_rep[0-9]+", "", colnames(normalized_matrix_num)))
+generate_heatmap <- function(de_results, title, sample_subset) {
+    # Extract significant DE genes
+    top_genes <- rownames(de_results$results_table)[de_results$results_table$FDR < 0.05]
+
+    # Subset normalized matrix for selected genes AND relevant samples
+    normalized_matrix_hits <- normalized_matrix_num[rownames(normalized_matrix_num) %in% top_genes, sample_subset]
+
+    # Scale the data
+    normalized_matrix_hits <- t(scale(t(normalized_matrix_hits)))
+    
+    # Define colors for sample annotations
+    unique_samples <- unique(colnames(normalized_matrix_hits))
+    unique_samples_colour <- rainbow(n=length(unique_samples))
+    names(unique_samples_colour) <- unique_samples
+    
+    sample_groups <- gsub("-", "_", gsub("_rep[0-9]+", "", colnames(normalized_matrix_hits)))
+    unique_groups <- unique(sample_groups)
+    unique_groups_colour <- rainbow(n=length(unique_groups))
+    names(unique_groups_colour) <- unique_groups
+
+    # Define heatmap color scale
+    heatmap_col <- colorRamp2(c(min(normalized_matrix_hits), 0, max(normalized_matrix_hits)), c("blue", "white", "red"))
+
+    # Sample annotation
+    hat_pat <- HeatmapAnnotation(df = data.frame(samples = colnames(normalized_matrix_hits),
+                                                 groups = sample_groups),
+                                 col = list(samples = unique_samples_colour,
+                                            groups = unique_groups_colour),
+                                 show_legend = TRUE)
+    
+    # Generate heatmap
+    h <- Heatmap(as.matrix(normalized_matrix_hits),
+            top_annotation = hat_pat,
+            cluster_rows = TRUE,
+            cluster_columns = TRUE,
+            show_row_dend = TRUE,
+            show_column_dend = TRUE,
+            col = heatmap_col,
+            show_column_names = FALSE,
+            show_row_names = FALSE,
+            show_heatmap_legend = TRUE,
+            use_raster = FALSE,
+            column_title = title)
+    return(h)
+}
+# Define sample subsets for each pairwise comparison
+samples_M2_vs_M2CAF <- colnames(normalized_matrix_num)[sample_groups %in% c("M2_CTRL", "M2_CAF_CTRL")]
+samples_M2CAF_vs_M2CAFFOLFIRINOX <- colnames(normalized_matrix_num)[sample_groups %in% c("M2_CAF_CTRL", "M2_CAF_FOLFI")]
+```
+
+Two heatmaps are used to visualize the expression values of the top differentially expressed gene (where FDR \< 0.05) from the analysis between M2 macrophages and M2 macrophages co-cultured with CAFs as shown in figure 6 and the analysis between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX. In both heatmaps, the samples from the same condition or group seems to be clustered together, indicating that the gene expression profile is consistent within each condition and the selected DE genes successfully differentiate between conditions. The clustering pattern support the validity of differential expression analysis. Both heatmaps, especially for figure 7, show clear clustering of genes with groups of distinct genes showing similar expression pattern across samples under same conditions, suggesting co-expression and possibly the involvement in the same pathway. Further enrichment analysis can be used to validate this hypothesis. We can also see that some cluster of genes are up-regulated in 1 condition as shown in red and some are down-regulated as shown in blue.
+
+```{r, fig.cap="Figure 6: Heatmap comparing RNA-seq data between M2 macrophages and M2 macrophages co-cultured with CAFs"}
+heatmap_M2_vs_M2CAF <- generate_heatmap(M2_vs_M2CAF_DE, "Heatmap: M2 vs. M2CAF (FDR < 0.05)", samples_M2_vs_M2CAF)
+heatmap_M2_vs_M2CAF
+```
+
+```{r, fig.cap ="Figure 7: Heatmap comparing RNA-seq data between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX"}
+heatmap_M2CAF_vs_M2CAFFOLFIRINOX <- generate_heatmap(M2CAF_vs_M2CAFFOLFIRINOX_DE, "Heatmap: M2CAF vs. M2CAFFOLFIRINOX (FDR < 0.05)", samples_M2CAF_vs_M2CAFFOLFIRINOX)
+# heatmap_M2FOLFI_vs_M2CAF_FOLFI <- generate_heatmap(M2FOLFIRINOX_vs_M2CAFFOLFIRINOX_DE, "Heat
+heatmap_M2CAF_vs_M2CAFFOLFIRINOX
+```
+
+# 2 Thresholded over-representation analysis {#2intro}
+
+Since heatmap comparing RNA-seq data between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX present clear clustering of genes that have distinct and opposite expression pattern across two different conditions, over-representation analysis(ORA) is conducted using g:Profiler on this dataset [@kolberg2023g]. ORA evaluates whether some gene sets are overly represented in the given gene list wihtout requiring a ranked list or a full list of genes. Since we are only looking at part of the genes with some threshold applied, ORA with g:profiler will be the best choice. FDR corrections are applied to each g:profiler query and only the significant gene sets are return.
+
+Additionally, the analysis used Gene Ontology (<GO:BP>), Reactome (REAC), and WikiPathways (WP) as annotation source [@ashburner2000gene; @gene2023gene; @milacic2024reactome; @agrawal2024wikipathways]. Association of genes to <GO:BP> can describe molecular function, biological processes and cellular components. REAC can capture molecular details of biological pathways and process. WP provides community-driven knowledge for biological pathways. The three sources are commonly recommended as the source and can give comprehensive view of the pathways enriched in the given gene set.
+
+We evaluate three different thresholded list from previous differential expression result are used: 1) all differentially expressed genes with fdr \< 0.05; 2) up regulated genes with fdr \< 0.05 and log fold change \> 1; 3) down regulated genes with fdr \< 0.05 and log fold change \< -1. The thresholds are inspired from the original paper.
+
+```{r}
+result_df <- M2CAF_vs_M2CAFFOLFIRINOX_DE$results_table
+up_reg_genes <- rownames(result_df)[which(result_df$logFC > 1 & result_df$FDR < 0.05)]
+down_reg_genes <- rownames(result_df)[which(result_df$logFC < 1 & result_df$FDR < 0.05)]
+all_de_genes <- rownames(result_df)[which(result_df$FDR < 0.05)]
+all_de_results <- gost(
+  all_de_genes,
+  significant=TRUE,
+  exclude_iea=TRUE,
+  ordered_query = FALSE,
+  organism = "hsapiens",
+  correction_method ="fdr",
+  source = c("GO:BP", "REAC", "WP")
+)
+up_results <- gost(
+  query=up_reg_genes,
+  significant=TRUE,
+  exclude_iea=TRUE,
+  ordered_query = FALSE,
+  organism = "hsapiens",
+  correction_method ="fdr",
+  source = c("GO:BP", "REAC", "WP")
+)
+down_results <- gost(
+  down_reg_genes,
+  significant=TRUE,
+  exclude_iea=TRUE,
+  ordered_query = FALSE,
+  organism = "hsapiens",
+  correction_method ="fdr",
+  source = c("GO:BP", "REAC", "WP")
+)
+```
+
+The analysis is performed using the latest g:profiler annotation version Ensembl 112 for gene mapping and functional annotations (as shown from e112_eg59_p19_25aa4782).
+
+```{r}
+up_results$meta$version
+down_results$meta$version
+all_de_results$meta$version
+```
+
+### 2a All DE Genes {#2a}
+
+For all differential expressed genes with fdr \< 0.05, 1217 gene sets are siginificantly enriched, with 1023 gene sets from <GO:BP>, 134 from REAC and 60 from WP.
+
+```{r}
+all_de_enrich <- as.data.frame(all_de_results$result)
+nrow(all_de_enrich)
+all_de_enrich <- all_de_enrich %>% dplyr::select(p_value, term_id, source, term_name) %>% arrange(p_value) 
+kable(all_de_enrich %>% group_by(source) %>% count(), format="html")
+```
+
+The five most enriched pathways sort the most significant p values are: response to stress, response to stimulus, Neutrophil degranulation, cellular response to stimulus, Immune System.
+
+```{r}
+kable(head(all_de_enrich), format="html")
+```
+
+### 2b Up Regulated Gene {#2b}
+
+For up regulated genes as defined above, 283 gene sets are siginificantly enriched, with 215 gene sets from <GO:BP>, 16 from REAC and 52 from WP.
+
+```{r}
+up_enrich <- as.data.frame(up_results$result)
+up_enrich <- up_enrich %>% dplyr::select(p_value, term_id, source, term_name) %>% arrange(p_value)
+nrow(up_enrich)
+kable(up_enrich %>% group_by(source) %>% count(), format="html")
+```
+
+The five most enriched pathways sort the most significant p values are: p53 transcriptional gene network, Dcellular response to stress, DNA damage response, miRNA regulation of DNA damage response, and DNA damage response.
+
+```{r}
+up_enrich$term_name[1:5]
+kable(head(up_enrich), format="html")
+```
+
+## 2c Down Regulated Genes {#2c}
+
+For down regulated genes as defined above, 1127 gene sets are siginificantly enriched, with 964 gene sets from <GO:BP>, 130 from REAC and 33 from WP.
+
+```{r}
+down_enrich <- as.data.frame(down_results$result)
+down_enrich <- down_enrich %>% dplyr::select(p_value, term_id, source, term_name) %>% arrange(p_value)
+nrow(down_enrich)
+kable(down_enrich %>% group_by(source) %>% count(), format="html")
+```
+
+The five most enriched pathways sort the most significant p values are: "response to stress", "Neutrophil degranulation", "Immune System", "inflammatory response","immune system process"
+
+```{r}
+kable(head(down_enrich), format="html")
+```
+
+## 2d ORA Result Summary {#2d}
+
+From the 3 different analysis using all differentially expressed genes, up-regulated set of genes, and the down-regulated set of genes separately. They all give similiar results related to response to stress. The result from ORA using down regulated genes suggest that the genes involved in immmune response and response to stress are repressed and the result using up regulated genes suggest that genes involved in DNA damage response and TP53 transcription gene network and cellular response to stress are up-regulated. The result from all differentially expressed genes suggest pathways on response to stress are enriched. Morever, there are a lot of similarity between between the pathways enriched in down regulated genes and all differentially expressed genes both in terms of the number of enriched pathways from all three sources and the top 5 more enriched pathways. This could suggest that down-regulated genes strongly contribute to the overall enrichment.
+
+# Discussion {#discussion}
+
+In the paper, 10 genes of interest are identified where they are upregulated when adding CAFs to the control group and downregulated when you add FOLFIRINOX treatment to the macrophages CAF and vice versa [@hussain2024macrophages]. From Although only 8 out of the 10 genes are identified in my dataset, we can see that some originally upregulated gene like SYNPO, LAD1 in the valcano plot in 1a are downregulated in volcano plot 1b and some downregulated gene in 1a are up regulated, which agree with the results from the original paper.
+
+The original paper report that CAFs lead to more polarized M2 macrophages and M2 macrophages polarization is associated with worst surival rate in PDAC patient. Under presence of FLOLFIRINOX, CAFs limit the FOLFIRINOX-induced cell death of macrophages and reinforce M2 plorization contributing the chemoresistance [@hussain2024macrophages]. However, the ORA results from part 2 shows the down-regulated genes in M2 marcophages CAF and FLOLFIRINOX enriched pathways like immune response and response to stress, which could suggest the reduced immune response under FLOLFIRINOX treatment, suggesting that CAFs does not fully restore the M2 polarization. The up-regulated genes in M2 marcophages with CAF and FLOLFIRINOX enriched pathways like p53 transcriptional gene network, DNA damage response and cellular response to stress. The upregulation of p53 transcriptional gene network indicate that FLOLFIRINOX is inducing stress to the macrophages. DNA damage response and cellular response to stress could suggest that macrophages are responding to the stress, indicating macrophages are still resistant to the FLOLFIRINOX under CAFs. Thus, the result in the ORA analysis seems to partially agree with the original paper in that macrophages with CAFs seems to be resistant to the treatment but it does not fully restore the effect of FLOLFIRINOX.
+
+In addition, since the diffierential expression analysis and ORA analysis will only show genetic profile of the macrophages under different conditions and they are also limited as only few differentially expressed genes are accounted, it is likely that although CAF can limit cell death induced by FOLFIRINOX and contribute to chemoresistance but their effect are limited and expression pattern is still changed by FOLFIRINOX. The chemoresistance of CAF is well-established and other studies had found it also contribute to the chemoresistance to Gemcitabine, another PDAC treatment [@hessmann2018fibroblast].
+
+# Conclusion
+
+The differential gene expression analysis support the 10 gene of interests identified in the article about their switch in up-regulation and down-regulation under different condition. The thresholded ORA analysis does not support the article's findings on how CAF can limit cell death induced by FOLFIRINOX and reinforce M2 polarization. However the ORA analysis is limited as only a subset of genes are selected and also can not reveal the underlying mechanism between FOLFIRINOX and CAF.
+
+# Answer to Questions
+
+Note: this section will contain repeated text from the report above for the purpose of easier grading.
+
+### DE analysis
+
+1.  Calculate p-values for each of the genes in your expression set. How many genes were significantly differentially expressed? What thresholds did you use and why? 
+
+In differential expression between M2 macrophages and M2 macrophages co-cultured with CAFs, by applying a threhold of p value less than 0.05, 3432 genes are significantly differentially expressed. The same threshold gives 1030 significantly differentially expressed genes in differential expression between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX.
+
+[Differential Expression Between M2 macrophages and M2 macrophages co-cultured with CAFs](#1a) 
+
+[Differential Expression Between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX](#1b)
+
+2.  Multiple hypothesis testing - correct your p-values using a multiple hypothesis correction method. Which method did you use? And Why? How many genes passed correction? 
+
+I applied specifically False Discovery Rate (FDR) method. FDR is a good choice for multiple hypothesis testing as it controls the proportion of false positives while also identify differentially expressed genes as it is less stringent and conservative compared to the Bonferroni correction.In differential expression between M2 macrophages and M2 macrophages co-cultured with CAFs, by applying a threhold of fdr than 0.05, 2437 genes passed correction. 382 genes passed correction in differential expression between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX.
+
+[Differential Expression Between M2 macrophages and M2 macrophages co-cultured with CAFs](#1a) 
+
+[Differential Expression Between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX](#1b)
+
+3.  Show the amount of differentially expressed genes using an MA Plot or a Volcano plot. Highlight genes of interest.
+
+See [Figure 4](#1a), [Figure 5](#1b). The genes of interest are the 10 differentially expressed genes that are upregulated when adding CAFs to the control group and downregulated when you add CAFs under FOLFIRINOX treatment and vice versa: SLC40A1, METTL27, CCDC152, SELENOP, NLRP1, SHE, GPR155, SYNPO, GOS2 and LAD1, as reported in the paper [@hussain2024macrophages].
+
+4.  Visualize your top hits using a heatmap. Do you conditions cluster together? Explain why or why not.
+
+Two heatmaps are used to visualize the expression values of the top differentially expressed gene (where FDR \< 0.05) from the analysis between M2 macrophages and M2 macrophages co-cultured with CAFs as shown in figure 6 and the analysis between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX. In both heatmaps, the samples from the same condition or group seems to be clustered together, indicating that the gene expression profile is consistent within each condition and the selected DE genes successfully differentiate between conditions. The clustering pattern support the validity of differential expression analysis. Both heatmaps, especially for figure 7, show clear clustering of genes with groups of distinct genes showing similar expression pattern across samples under same conditions, suggesting co-expression and possibly the involvement in the same pathway. Further enrichment analysis can be used to validate this hypothesis. We can also see that some cluster of genes are up-regulated in 1 condition as shown in red and some are down-regulated as shown in blue.
+
+[Differential Expression Analyis Using Heatmaps](#1c)
+
+### Thresholded over-representation analysis
+
+1.  Which method did you choose and why?
+
+Over-representation analysis(ORA) is conducted using g:Profiler on this dataset [@kolberg2023g], since heatmap comparing RNA-seq data between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX present clear clustering of genes that have distinct and opposite expression pattern across two different conditions. ORA evaluates whether some gene sets are overly represented in the given gene list wihtout requiring a ranked list or a full list of genes. Since we are only looking at part of the genes with some threshold applied, ORA with g:profiler will be the best choice. FDR corrections are applied to each g:profiler query and only the significant gene sets are return.
+
+[ORA analysis intro](#2intro)
+
+2.  What annotation data did you use and why? What version of the annotation are you using?
+
+The analysis used Gene Ontology (<GO:BP>), Reactome (REAC), and WikiPathways (WP) as annotation source [@ashburner2000gene; @gene2023gene; @milacic2024reactome; @agrawal2024wikipathways]. Association of genes to <GO:BP> can describe molecular function, biological processes and cellular components. REAC can capture molecular details of biological pathways and process. WP provides community-driven knowledge for biological pathways. The three sources are commonly recommended as the source and can give comprehensive view of the pathways enriched in the given gene set.
+
+[ORA analysis intro](#2intro)
+
+3.  How many genesets were returned with what thresholds?
+
+We evaluate three different thresholded list from previous differential expression result are used: for all differentially expressed genes with fdr \< 0.05, 1217 gene sets are siginificantly enriched, with 1023 gene sets from <GO:BP>, 134 from REAC and 60 from WP.
+
+[threshold list definition](#2intro)
+
+[genesets returned by all differentially expressed genes](#2a)
+
+4.  Run the analysis using the up-regulated set of genes, and the down-regulated set of genes separately. How do these results compare to using the whole list (i.e all differentially expressed genes together vs. the up-regulated and down regulated differentially expressed genes separately)?
+
+For up regulated genes with fdr \< 0.05 and log fold change \> 1, 283 gene sets are siginificantly enriched, with 215 gene sets from <GO:BP>, 16 from REAC and 52 from WP. For down regulated genes with fdr \< 0.05 and log fold change \< -1, 1127 gene sets are siginificantly enriched, with 964 gene sets from <GO:BP>, 130 from REAC and 33 from WP. The thresholds are inspired from the original paper.
+
+From the 3 different analysis using all differentially expressed genes, up-regulated set of genes, and the down-regulated set of genes separately. They all give similar results related to response to stress. The result from ORA using down regulated genes suggest that the genes involved in immune response and response to stress are repressed and the result using up regulated genes suggest that genes involved in DNA damage response and TP53 transcription gene network and cellular response to stress are up-regulated. The result from all differentially expressed genes suggest pathways on response to stress are enriched. Moreover, there are a lot of similarity between between the pathways enriched in down regulated genes and all differentially expressed genes both in terms of the number of enriched pathways from all three sources and the top 5 more enriched pathways. This could suggest that down-regulated genes strongly contribute to the overall enrichment.
+
+[genesets returned by up regulated genes](#2b)
+
+[genesets returned by up regulated genes](#2c)
+
+[result comparison](#2d)
+
+### Interpretation
+
+1.  Do the over-representation results support conclusions or mechanism discussed in the original paper?
+
+The original paper report that CAFs lead to more polarized M2 macrophages and M2 macrophages polarization is associated with worst surival rate in PDAC patient. Under presence of FLOLFIRINOX, CAFs limit the FOLFIRINOX-induced cell death of macrophages and reinforce M2 plorization contributing the chemoresistance [@hussain2024macrophages]. However, the ORA results from part 2 shows the down-regulated genes in M2 marcophages CAF and FLOLFIRINOX enriched pathways like immune response and response to stress, which could suggest the reduced immune response under FLOLFIRINOX treatment, suggesting that CAFs does not fully restore the M2 polarization. The up-regulated genes in M2 marcophages with CAF and FLOLFIRINOX enriched pathways like p53 transcriptional gene network, DNA damage response and cellular response to stress. The upregulation of p53 transcriptional gene network indicate that FLOLFIRINOX is inducing stress to the macrophages. DNA damage response and cellular response to stress could suggest that macrophages are responding to the stress, indicating macrophages are still resistant to the FLOLFIRINOX under CAFs. Thus, the result in the ORA analysis seems to partially agree with the original paper in that macrophages with CAFs seems to be resistant to the treatment but it does not fully restore the effect of FLOLFIRINOX.
+
+
+[second paragraph of discussion](#discussion)
+
+2.  Can you find evidence, i.e. publications, to support some of the results that you see. How does this evidence support your results.
+
+Since the diffierential expression analysis and ORA analysis will only show genetic profile of the macrophages under different conditions and they are also limited as only few differentially expressed genes are accounted, it is likely that although CAF can limit cell death induced by FOLFIRINOX and contribute to chemoresistance but their effect are limited and expression pattern is still changed by FOLFIRINOX. The chemoresistance of CAF is well-established and other studies had found it also contribute to the chemoresistance to Gemcitabine, another PDAC treatment [@hessmann2018fibroblast].
+
+
+[third paragraph of discussion](#discussion)
