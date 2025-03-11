@@ -247,7 +247,6 @@ heatmap_M2_vs_M2CAF
 
 ```{r, fig.cap ="Figure 7: Heatmap comparing RNA-seq data between M2 macrophages co-cultured with CAFs and M2 macrophages co-cultured with CAFs and treated with FOLFIRINOX"}
 heatmap_M2CAF_vs_M2CAFFOLFIRINOX <- generate_heatmap(M2CAF_vs_M2CAFFOLFIRINOX_DE, "Heatmap: M2CAF vs. M2CAFFOLFIRINOX (FDR < 0.05)", samples_M2CAF_vs_M2CAFFOLFIRINOX)
-# heatmap_M2FOLFI_vs_M2CAF_FOLFI <- generate_heatmap(M2FOLFIRINOX_vs_M2CAFFOLFIRINOX_DE, "Heat
 heatmap_M2CAF_vs_M2CAFFOLFIRINOX
 ```
 
