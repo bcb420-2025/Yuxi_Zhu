@@ -1,0 +1,153 @@
+---
+title: "Assignment 3: Data set Pathways and Network Analysis"
+subtitle: "BCB420 Computational System Biology"
+author: "Yuxi Zhu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    fig_width: 7
+    fig_height: 6
+    fig_caption: true
+bibliography: a3_references.bib
+csl: biomed-central.csl
+---
+Library used [@xie2018knitr]:
+```{r}
+library(knitr)
+```
+### Link to Github Wiki
+
+[A3 wiki notebook](https://github.com/bcb420-2025/Yuxi_Zhu/wiki/Entry-12:-A3-Data-set-Pathway-and-Network-Analysis)
+
+# Introduction
+Pancreatic ductal adenocarcinoma (PDAC) is one of the leading cause of cancer related death in North America, due to lack in early detection and its resistence to chemoimmunotherapy [@ju2024barriers]. Cancerassociated fibroblasts (CAFs) are the type of cells predominantly found in tumor microenvironment of PDAC and are associated with poor overall survival of patients. In addition, Folfirinox, a new chemotherapeutic drug developed, was reported to have superior effect among PDAC patients [@hussain2024macrophages]. 
+
+To further study transcriptomics of PDAC and the intricate relationship between CAF and Folfirinox, we obtain RNA expression data from GSE226448 from the study [@hussain2024macrophages]. The dataset consist of 4 conditions with 3 replicates for each condition and the four conditions are: M2 macrophages control, M2 macrophages in coculture with CAFs, M2 macrophages in coculture with CAFs and treated with Folfirinox, M2 macrophages treated with Folfirinox. I have previously filtered and mapped the expression data from ensembl id to HGNC symbols, bringing the size of the dataset from 60660 to 13121. I then normalized the expression data using edgeR so that it follows a negative binomial distribution, see fig 1-2 [@robinson2010edger].
+
+```{r fig:1, fig.align = 'center', out.height = "75%", fig.cap = "Figure 1 Distribution of the RNA Seq Expression Data after Normalization. 12 different samples in the dataset are represented as different colour shown in the legend."}
+knitr::include_graphics(here::here("A3_figure", "expression distribution.png"))
+```
+
+```{r fig:2, fig.align = 'center', out.height = "75%", fig.cap = "Figure 2 The mean variance plot of the RNA seq data, where the blue line indicates negative binomial variance trendline. "}
+knitr::include_graphics(here::here("A3_figure", "plot.png"))
+```
+
+Next, using the normalized dataset, I conduct differential expression analysis pairwise for the four different conditions. Using log fold change and p value of all genes from the differential expression between M2 macrophages in co-culture with CAFs and M2 macrophages in coculture with CAFs and treated with Folfirinox, I constructed a ranked list of genes using the code below, where the most upregulated genes are at the top and most down regulated genes are at the bottum.
+
+Note: running this code will give you the ranked list, however I excluded for the report for readability.
+```
+{r, child = 'A2_YuxiZhu.Rmd', eval = FALSE, include=FALSE, echo = TRUE}
+result_df <- M2CAF_vs_M2CAFFOLFIRINOX_DE$results_table
+result_df$rank <- -log(result_df$PValue, base=10) * sign(result_df$logFC)
+result_df <- result_df[order(-result_df$rank), ]
+write.table(x = data.frame(genename = rownames(result_df),
+                           F_stat = result_df$rank),
+            file = file.path(getwd(), "M2CAF_vs_M2CAFFOLFIRINOX.rnk"),
+            sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+```
+
+For this analysis, we will be using the ranked list "M2CAF_vs_M2CAFFOLFIRINOX.rnk" to perform non-thresholded pathway analysis using GSEA [@subramanian2005gene; @mootha2003pgc]. The result of the analysis will be further investigate using Cytoscape and Enrichment map pipeline to present a different view of the data [@shannon2003cytoscape; @merico2010enrichment].
+
+# Non-thresholded Gene set Enrichment Analysis
+
+## Method and Gene Sets Used {#method-and-genesets}
+
+We conducted the non-thresholded pathway analysis using software GSEA v4.4.0 Mac App [@subramanian2005gene; @mootha2003pgc]. I used the Human_GOBP_AllPathways_noPFOCR_no_GO_iea_March_01_2025_symbol.gmt from [Bader Lab's geneset collection](http://download.baderlab.org/EM_Genesets/current_release/Human/symbol/) and it is the latest release on March 1st, 2025, containing GO biological process, no IEA and pathways. For the parameters for the GSEA run, I used maximum geneset size of 200, minimum genset size of 15 and geneset permutation with 1000 number of permutations.
+
+## Enrichment Summary {#enrichment-summary}
+
+Using the GSEA software [@subramanian2005gene; @mootha2003pgc], I obtained the enrichment report as shown in figure 3. For the top of the ranked list, representing the upregulated genes comparing M2 macrophages with CAF and M2 macrophages with CAF treated with Folfirinox, I obtained 3329 gene sets upregulated and with 540 gene sets significantly enriched with p value \< 0.05. Figure 4 shows the top 5 genesets sorted by NES contains genes that are most overrepresented for the top of the ranked list. This indicates that the upregualated genes in M2 macrophages with CAF treated with Folfirinox are mostly related to P53 and TAP63 pathway, which are tumour suppressors, indicating the effecacy of the treatment of Folfirnox.
+
+For the bottum of the ranked list, representing the downregulated genes comparing M2 macrophages with CAF and M2 macrophages with CAF treated with Folfirinox, 1811 gene sets are upregulated and 321 gene sets are significantly enriched with p value \< 0.05. Figure 5 shows the top 5 genesets sorted by NES contains genes that are most overrepresented for the bottum of the ranked list. This indicates the downregulated genes in M2 macrophages with CAF treated with Folfirinox, compared to M2 macrophages with CAF only, are mostly related to protein synthesis.
+
+```{r fig:3, out.height = "75%", fig.cap = "Figure 3 Screenshot of GSEA report"}
+knitr::include_graphics(here::here("A3_figure", "gsea_report.png"))
+```
+
+```{r fig:4, fig.cap = "Figure 4 Top 5 Genesets, sorted by decreasing NES, are most overrepresented at the top of the list"}
+knitr::include_graphics(here::here("A3_figure", "top_5_geneset_pos.png"))
+```
+
+```{r fig:5, fig.cap = "Figure 5 Top 5 Genesets, sorted by increasing NES, are most overrepresented at the bottum of the list"}
+knitr::include_graphics(here::here("A3_figure", "top_5_geneset_neg.png"))
+```
+
+## Comparison with g:Profiler Thresholded Analysis {#comparison-assignment2}
+
+Previously, using thresholded over-representation analysis with gprofiler [@kolberg2020gprofiler2], the same differential expression result are also analyzed, where the upregulated genes yield 283 genesets and the downregulated genes yield 1127 gene sets, both with p-value \< 0.05. GSEA yield different number of enriched genesets [@subramanian2005gene; @mootha2003pgc]. From result in A2, the pathways enriched in upregulated genes from gprofiler and top rank in GSEA are similiar as pathways related to p53, DNA damage response are enriched [@subramanian2005gene; @mootha2003pgc; @kolberg2020gprofiler2]. On the other hand, the pathways enriched in downregulated genes from gprofiler are very different from the enrichment results using bottum rank in GSEA, as they are mostly related to stress and inflammatory response as shown in A2 [@subramanian2005gene; @mootha2003pgc; @kolberg2020gprofiler2]. The comparison between the two method indicates that the two methods can produce similiar enrichment results sometimes but they can also capture the different expression pattern. GSEA looks at the whole dataset that identify pattern could be overwise overlooked by gprofiler.
+
+# Visualizing Results using Enrichment Map
+
+To obtain a different view on the enrichment results, I visualize the results using network.
+
+## Enrichment Map Details {#enrichment-map}
+
+The GSEA results are further analyzed using EnrichmentMap pipeline within the software Cytoscape 3.10.3[@merico2010enrichment, @shannon2003cytoscape]. Based on [EnrichmentMap documentation](https://enrichmentmap.readthedocs.io/en/latest/index.html), I created the enrichment map by loading in the GSEA result and applied consrevative thresholds (p-value \< 0.001 and fdr \< 0.05) for geneset permutations. The parameters are listed as below:
+
+-   **FDR q-value cutoff**: `0.05`\
+-   **P-value cutoff**: `0.001`\
+-   **NES filtering**: None (all gene sets included)\
+-   **Edge similarity metric**: Combined Jaccard + Overlap coefficient (each weighted 50%) - **Similarity cutoff**: `0.375`\
+-   **Data set edge selection**: Automatic
+
+The resulting map contains 131 nodes and 1047 edges and the genesets that contains similiar genes are clustered together. Figure 6 shows the raw network applying the threshold. 
+
+```{r fig:6, fig.cap = "Figure 6 Enrichment map created with parameters fdr value < 0.05, and similarity cutoff >0.375 with combined constant = 0.5. Red and blue nodes represent M2 macrophages co-cultured with CAF with or without Floriflox treatment phenotyep pathways, respectively. Legends were manually added at the bottom of the figure, adapted from http://baderlab.org/Software/EnrichmentMap#Legends"}
+knitr::include_graphics(here::here("A3_figure", "raw.png"))
+```
+
+## Network Annotation {#annotation-parameters}
+The following analysis of GSEA results are based on EnrichmentMap Protocal [@reimand2019pathway]. 
+
+To annotate the network, I used the default parameters for annotating using AutoAnnotate v1.3 application in Cytoscape with the cluster labels generated via WordCloud with default FDR filter, minimum cluster size of 3, Jaccard similarity \> 0.375 [@kucera2016autoannotate].
+
+Notably, we observed a big cluster "selenocysteine synthesis valine" that are with low NES value, indicating the bottom of the ranked list or the downregulated gene in M2 with CAF and Floriflox enriched these pathways. We also observe clusters like "tp53 regulates cycles", "intrinsic apoptic signal" with low NES, suggesting that the upregulated gene in M2 with CAF and Floriflox enriched these pathways.
+
+```{r fig:7, fig.cap = "Figure 7 Enrichment map created with parameters fdr value < 0.05, and similarity cutoff >0.375 with combined constant = 0.5.  Red and blue nodes represent M2 macrophages co-cultured with CAF with or without Floriflox treatment phenotyep pathways, respectively. Nodes were arranged manually to form a clearer picture. Clusters are labeled using using the AutoAnnotate Cytoscape application. Legends were manually added at the bottom of the figure, adapted from http://baderlab.org/Software/EnrichmentMap#Legends"}
+knitr::include_graphics(here::here("A3_figure", "network.png"))
+```
+
+## Collapsed Theme Network and Interpretation {#theme-network}
+
+Using EnrichmentMap Protocal [@reimand2019pathway] and as show in figure 8, callapsing the network to a theme network shows the same observation as the uncollapsed network, where the pathways in M2 with CAF and Floriflox phenotype are mostly tp53, tp63 and DNA repair pathways and pathways in M2 with CAF are mostly about protein synthesis, as all of the cluster are not connected except dna signal transduction and apoptotic signaling. This could be because I applied conservative thresholds for geneset permutation threshold for the enrichment map resulting in less gene sets overall and thus less connection possible among clusters. There are also some themes related to Vitamin D receptor pathways in M2 macrophages with CAF and Floriflox phenotype and "cholestoral bloch kandutsch" in M2 macrophages with CAF phenotype which seems to be the outliers for the overall theme of the two phenotype.
+
+```{r fig:8, fig.cap = "Figure 8 The enrichment map was summarized by collapsing node clusters using the AutoAnnotate application. Each cluster of nodes from figure above is now represented as a single node. Red and blue nodes represent M2 macrophages co-cultured with CAF with or without Floriflox treatment phenotyep pathways, respectively. Legends are adapted from http://baderlab.org/Software/EnrichmentMap#Legends"}
+knitr::include_graphics(here::here("A3_figure", "collapse.png"))
+```
+
+# Discussion
+
+## Analysis of Results in Original Paper and Comparison of Thresholded and Non-Thresholded Method {#support-from-paper}
+
+The result from paper suggest that macrophages co-cultured with CAF shows significantly reduced phagocytic activity under the FOLFIRINOX treatment, as CAFs, previously promoting upregulation of certain chemokines, became less capable of its function [@hussain2024macrophages]. This is supported in the enrichment map (see figure 7) as well as the raw GSEA result (see figure 4) [@subramanian2005gene; @mootha2003pgc; @merico2010enrichment], as we are seeing lots of pathways related to p53 and cell apoptosis are related to M2 macropages with CAF treated with FOLFIRINOX phenotype. In addition, the study found an reduced SELENOP expression, encoding selenoprotein P (seP), in macrophages under the influence of FOLFIRINOX treatment and CAFs [@hussain2024macrophages]. This is also consistent with the raw GSEA result (see figure 5) [@subramanian2005gene; @mootha2003pgc], as the top genesets enriched related to M2 macropages with CAF or the most downregulated genes are mostly related to protein synthesis. In the enrichment map (see figure 7), we observe a big cluster of named "selenocysteine synthesis valine" from M2 macropages with CAF phenotype as majority of the gene set in this cluster are related to protein synthesis, indicating the upregulation of these genes in this phenotype as opposed to the phenotype treated with FOLFIRINOX, which is also consistent with the findings of the aritcle [@hussain2024macrophages].
+
+In addition, the results from the non-thresholded method GSEA and thresholded method from A2 are different due to the difference of input. The significantly down regulated genes enrich pathways involving immune response in thresholded method (see A2), while the genes that are down regulated with low ranks enrich pathways mostly related to protein in GSEA (see figure 4), suggesting that GSEA uncovered different pattern using the whole expression data. While the result from thresholded method did not support the article's finding in the decrease in seP protein expression observed in M2 macropages with CAF and FOLFIRINOX, the result from non-thresholded method does support it [@hussain2024macrophages]. This suggest the importance of method choice in bioinformatics. 
+
+
+## Detailed Investigation of TP53 Regulates Transcription of Cell Death Genes pathway {#detailed-pathway}
+The study claims that CAF presence can protect macrophages from FOLFIRINOX cell death [@hussain2024macrophages]. Also the article claims that the CAF macrophages with FOLFIRINOX result in less changes in gene expression compared to untreated CAF macrophages and they suggest CAF have greater influence on macrophage gene expression profile that the FOLFIRINOX can not overcome [@hussain2024macrophages]. However, from the enrichment results (see figure 7), I still see pathways related to tumour suppressive TP53 and TP63 are enriched in M2 macrophages with CAF and Floriflox phenotype. I choose the most significant pathway in one of the cluster enriched M2 macrophages with CAF and Floriflox phenotype with high ES score of 0.8463: TP53 Regulates Transcription of Cell Death Genes (see figure 8). This pathway is from Reactome with identifier R-HSA-5633008 [@milacic2024reactome]. I used GeneMANIA to create the pathway view with the ranked list and annotated each gene node with the rank value where the rank is caculated by `-log(result_df$PValue, base=10) * sign(result_df$logFC)` prevserving the quality of Log FC and p value, as shown in figure 9 [@warde2010genemania]. The figure shows that except four genes has high p value and positive Log FC and the rest of them have low p value with positive log fold change or negative log fold change. Most of the interactions between the genes are physical interaction, indicating the close connection among the genes in this pathway. The detail pathway analysis suggest that under CAF presence, the effect of FOLFIRINOX on macrophages seems to be limited in this specific pathway as only a few genes are significantly upregulated and many of the genes are downregulated compare to the macrophages with no FOLFIRINOX, potentially supporting the argument from the study that presence of CAF in macrophages could confer chemoresistence [@hussain2024macrophages]. 
+
+```{r fig:9, fig.cap = "Figure 9 The interaction network of the genes in TP53 Regulates Transcription of Cell Death Genes. Each node is represent the gene in the pathway that are present in the ranked list and the colour indicate the rank value. The colour of edge represent types of interaction. The plot is generated using the GeneMANIA application and Legends are manually added."}
+knitr::include_graphics(here::here("A3_figure", "pt_detail.png"))
+```
+
+## Analysis Result Supported From Literature {#literature-evidence}
+
+Furthermore, the result on downregulation of genes related to selenocysteine synthesis in M2 macropages with CAF and FOLFIRINOX phenotype (see figure 7) and the limited effect of FOLFIRINOX on macrophages co-cultured with CAF shown in detail pathway related to TP53 (see figure 9) are supported by a study suggesting that reduced expression in SeP increase M2-polarization and another study's finding that cervical cancer patients that are resistent to chemotherapy tend to have low expression SeP [@barrett2015selenoprotein; @qi2022role].
+
+# Conclustion
+The report focus on the analysis comparing M2 macrophages co-cultured with CAF without and with treatment of FOLFIRINOX. The ranked list of genes from the differential expression of the two conditions are analyzed using GSEA and further visualized using Cytoscape and its applications [@subramanian2005gene; @mootha2003pgc; @merico2010enrichment; @shannon2003cytoscape]. The result of the analysis, supported by the original paper and literature, suggest that although FOLFIRINOX can counteract the effect of CAF to some extent for M2 macrophages co-cultured with CAF, it is also limited due to the potential chemoresistence of CAF [@hussain2024macrophages; @barrett2015selenoprotein; @qi2022role]. Further analysis could be conducted to confirm the drug resistence of CAF and its mechanism.
+
+# Appendix: Questions
+1.  [What method did you use? What genesets did you use? Make sure to specify versions and cite your methods](#method-and-genesets)
+2.  [Summarize your enrichment results.](#enrichment-summary)
+3.  [How do these results compare to the results from the thresholded analysis in Assignment #2. Compare qualitatively. Is this a straight forward comparison? Why or why not?](#comparison-assignment2)
+4.  [Create an enrichment map - how many nodes and how many edges in the resulting map? What thresholds were used to create this map? Make sure to record all thresholds. Include a screenshot of your network prior to manual layout.](#enrichment-map)
+5.  [Annotate your network - what parameters did you use to annotate the network. If you are using the default parameters make sure to list them as well.](#annotation-parameters)
+6.  Make a publication ready figure - include this figure with proper legends in your notebook. **See Figure 7**
+7.  [Collapse your network to a theme network. What are the major themes present in this analysis? Do they fit with the model? Are there any novel pathways or themes?](#theme-network)
+8.  [Do the enrichment results support conclusions or mechanism discussed in the original paper? How do these results differ from the results you got from Assignment #2 thresholded methods](#support-from-paper)
+9.  [Can you find evidence, i.e. publications, to support some of the results that you see. How does this evidence support your result?](#literature-evidence)
+10. [Choose a specific pathway or theme to investigate in more detail. Why did you choose this pathway or theme? Show the pathway or theme as a gene network or as a pathway diagram. Annotate the network or pathway with your original log fold expression values and p-values to show how it is effected in your model. (Hint: if the theme or pathway is not from database that has detailed mechanistic information like Reactome you can use apps like GeneMANIA or String to build the the interaction network.)](#detailed-pathway)
