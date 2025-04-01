@@ -5,4 +5,4 @@ repo for bcb420 for Yuxi Zhu
 
 [Link to A2 html](A2_YuxiZhu.html)
 
-[Link to A3 hmtl](A2_YuxiZhu.html)
+[Link to A3 hmtl](A3_YuxiZhu.html)
